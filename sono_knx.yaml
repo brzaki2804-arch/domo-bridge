@@ -1,0 +1,202 @@
+blueprint:
+  name: "Domo · Sono (lecteur multimédia) ↔ KNX"
+  description: >
+    Relie un lecteur (HEOS, Sonos, Spotify, WiiM…) à des adresses de groupe KNX :
+    lecture/pause, stop, piste, volume, muet, source, textes affichés.
+    Laisser une adresse à 31/7/254 = objet non utilisé.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Lecteur
+      selector: { entity: { domain: media_player } }
+    ga_play:
+      name: "Play/Pause — W — 1 bit — DPT 1.001 (1 = lecture)"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_play_status:
+      name: "Play/Pause Status — R,T — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_stop:
+      name: "Stop — W — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_track:
+      name: "Piste suivante/précédente — W — 1 bit (1 = suivante)"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_vol_set:
+      name: "Volume absolu Set — W — 1 octet — DPT 5.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_vol_status:
+      name: "Volume Status — R,T — 1 octet — DPT 5.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_vol_rel:
+      name: "Volume relatif — W — 1 bit (1 = plus fort, pas de 5 %)"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_vol_dim:
+      name: "Volume variation — W — 4 bits — DPT 3.007"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_mute:
+      name: "Muet — W — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_mute_status:
+      name: "Muet Status — R,T — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_source:
+      name: "Source n° — W — 1 octet — DPT 5.010"
+      description: Numéro dans la liste des sources du lecteur (1 = première)
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_titre:
+      name: "Titre — T — 14 car. — DPT 16.000"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_artiste:
+      name: "Artiste — T — 14 car. — DPT 16.000"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_album:
+      name: "Album / station — T — 14 car. — DPT 16.000"
+      default: "31/7/254"
+      selector: { text: {} }
+
+mode: queued
+max: 30
+
+variables:
+  e: !input entite
+  vide: "31/7/254"
+  ga_play: !input ga_play
+  ga_stop: !input ga_stop
+  ga_track: !input ga_track
+  ga_vol_set: !input ga_vol_set
+  ga_vol_rel: !input ga_vol_rel
+  ga_vol_dim: !input ga_vol_dim
+  ga_mute: !input ga_mute
+  ga_source: !input ga_source
+  ga_play_status: !input ga_play_status
+  ga_vol_status: !input ga_vol_status
+  ga_mute_status: !input ga_mute_status
+  ga_titre: !input ga_titre
+  ga_artiste: !input ga_artiste
+  ga_album: !input ga_album
+  lecture: "{{ 1 if is_state(e, 'playing') else 0 }}"
+  volume: "{{ ((state_attr(e, 'volume_level') or 0) * 100) | round | int }}"
+  muet: "{{ 1 if state_attr(e, 'is_volume_muted') else 0 }}"
+  titre: "{{ ((state_attr(e, 'media_title') or '') | string | regex_replace('[^ -~]', '?'))[:14] }}"
+  artiste: "{{ ((state_attr(e, 'media_artist') or '') | string | regex_replace('[^ -~]', '?'))[:14] }}"
+  album: "{{ ((state_attr(e, 'media_album_name') or state_attr(e, 'media_station') or '') | string | regex_replace('[^ -~]', '?'))[:14] }}"
+
+triggers:
+  - trigger: knx.telegram
+    destination: [!input ga_play, !input ga_stop, !input ga_track, !input ga_vol_set, !input ga_vol_rel, !input ga_vol_dim, !input ga_mute, !input ga_source]
+    group_value_write: true
+    group_value_read: false
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: cmd
+  - trigger: knx.telegram
+    destination: [!input ga_play_status, !input ga_vol_status, !input ga_mute_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: false
+    id: lecture_ga
+  - trigger: state
+    entity_id: !input entite
+    id: etat
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+actions:
+  - choose:
+      - conditions: [{ condition: trigger, id: cmd }]
+        sequence:
+          - variables:
+              p: "{{ trigger.payload }}"
+              raw: "{{ (p[0] if p is iterable and p is not string else p) | int(0) }}"
+              dest: "{{ trigger.destination }}"
+          - choose:
+              - conditions: "{{ dest == ga_play }}"
+                sequence:
+                  - action: "{{ 'media_player.media_play' if raw == 1 else 'media_player.media_pause' }}"
+                    target: { entity_id: !input entite }
+              - conditions: "{{ dest == ga_stop and raw == 1 }}"
+                sequence: [{ action: media_player.media_stop, target: { entity_id: !input entite } }]
+              - conditions: "{{ dest == ga_track }}"
+                sequence:
+                  - action: "{{ 'media_player.media_next_track' if raw == 1 else 'media_player.media_previous_track' }}"
+                    target: { entity_id: !input entite }
+              - conditions: "{{ dest == ga_vol_set }}"
+                sequence:
+                  - action: media_player.volume_set
+                    target: { entity_id: !input entite }
+                    data: { volume_level: "{{ (raw / 255) | round(2) }}" }
+              - conditions: "{{ dest == ga_vol_rel }}"
+                sequence:
+                  - action: media_player.volume_set
+                    target: { entity_id: !input entite }
+                    data: { volume_level: "{{ [[ (state_attr(e, 'volume_level') or 0) + (0.05 if raw == 1 else -0.05), 0] | max, 1] | min | round(2) }}" }
+              - conditions: "{{ dest == ga_vol_dim and raw % 8 > 0 }}"
+                sequence:
+                  - action: media_player.volume_set
+                    target: { entity_id: !input entite }
+                    data: { volume_level: "{{ [[ (state_attr(e, 'volume_level') or 0) + (0.05 if raw // 8 == 1 else -0.05), 0] | max, 1] | min | round(2) }}" }
+              - conditions: "{{ dest == ga_mute }}"
+                sequence:
+                  - action: media_player.volume_mute
+                    target: { entity_id: !input entite }
+                    data: { is_volume_muted: "{{ raw == 1 }}" }
+              - conditions: "{{ dest == ga_source }}"
+                sequence:
+                  - variables: { liste: "{{ state_attr(e, 'source_list') or [] }}" }
+                  - condition: template
+                    value_template: "{{ 1 <= raw <= liste | length }}"
+                  - action: media_player.select_source
+                    target: { entity_id: !input entite }
+                    data: { source: "{{ liste[raw - 1] }}" }
+
+      - conditions:
+          - condition: trigger
+            id: [etat, demarrage]
+        sequence:
+          - if: [{ condition: trigger, id: demarrage }]
+            then: [{ delay: { seconds: 15 } }]
+          - variables:
+              avant: "{{ trigger.from_state.attributes if trigger.id == 'etat' and trigger.from_state else {} }}"
+              etat_avant: "{{ trigger.from_state.state if trigger.id == 'etat' and trigger.from_state else '' }}"
+              demarre: "{{ trigger.id == 'demarrage' }}"
+          - if: "{{ ga_play_status != vide and (demarre or etat_avant != states(e)) }}"
+            then: [{ action: knx.send, data: { address: !input ga_play_status, payload: "{{ lecture }}" } }]
+          - if: "{{ ga_vol_status != vide and (demarre or avant.volume_level != state_attr(e, 'volume_level')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_vol_status, payload: "{{ volume }}", type: percent } }]
+          - if: "{{ ga_mute_status != vide and (demarre or avant.is_volume_muted != state_attr(e, 'is_volume_muted')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_mute_status, payload: "{{ muet }}" } }]
+          - if: "{{ ga_titre != vide and (demarre or avant.media_title != state_attr(e, 'media_title')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_titre, payload: "{{ titre }}", type: string } }]
+          - if: "{{ ga_artiste != vide and (demarre or avant.media_artist != state_attr(e, 'media_artist')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_artiste, payload: "{{ artiste }}", type: string } }]
+          - if: "{{ ga_album != vide and (demarre or avant.media_album_name != state_attr(e, 'media_album_name') or avant.media_station != state_attr(e, 'media_station')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_album, payload: "{{ album }}", type: string } }]
+
+      - conditions: [{ condition: trigger, id: lecture_ga }]
+        sequence:
+          - variables: { dest: "{{ trigger.destination }}" }
+          - choose:
+              - conditions: "{{ dest == ga_play_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_play_status, payload: "{{ lecture }}", response: true } }]
+              - conditions: "{{ dest == ga_vol_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_vol_status, payload: "{{ volume }}", type: percent, response: true } }]
+              - conditions: "{{ dest == ga_mute_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_mute_status, payload: "{{ muet }}", response: true } }]

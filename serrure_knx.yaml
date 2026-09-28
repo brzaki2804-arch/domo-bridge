@@ -1,0 +1,87 @@
+blueprint:
+  name: "Domo · Serrure ↔ KNX"
+  description: >
+    Relie une serrure connectée (Matter, Zigbee…) à des adresses de groupe KNX.
+    1 = verrouiller, 0 = déverrouiller. Laisser une adresse à 31/7/254 = non utilisé.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Serrure
+      selector: { entity: { domain: lock } }
+    ga_set:
+      name: "Lock/Unlock Set — W — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_status:
+      name: "Lock Status — R,T — 1 bit — DPT 1.001"
+      description: 1 = verrouillée
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_open:
+      name: "Ouvrir (gâche) — W — 1 bit — DPT 1.001"
+      description: 1 = ouvrir la porte, si la serrure le permet
+      default: "31/7/254"
+      selector: { text: {} }
+
+mode: queued
+max: 20
+
+variables:
+  entite: !input entite
+  vide: "31/7/254"
+  ga_status: !input ga_status
+  ga_open: !input ga_open
+  etat_bit: "{{ 1 if is_state(entite, 'locked') else 0 }}"
+
+triggers:
+  - trigger: knx.telegram
+    destination: [!input ga_set, !input ga_open]
+    group_value_write: true
+    group_value_read: false
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: cmd
+  - trigger: knx.telegram
+    destination: [!input ga_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: false
+    id: lecture
+  - trigger: state
+    entity_id: !input entite
+    to: ["locked", "unlocked"]
+    id: etat
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+actions:
+  - choose:
+      - conditions: [{ condition: trigger, id: cmd }]
+        sequence:
+          - choose:
+              - conditions: "{{ trigger.destination == ga_open and trigger.payload == 1 }}"
+                sequence: [{ action: lock.open, target: { entity_id: !input entite } }]
+            default:
+              - action: "{{ 'lock.lock' if trigger.payload == 1 else 'lock.unlock' }}"
+                target: { entity_id: !input entite }
+      - conditions:
+          - condition: trigger
+            id: [etat, demarrage]
+          - "{{ ga_status != vide }}"
+        sequence:
+          - if: [{ condition: trigger, id: demarrage }]
+            then: [{ delay: { seconds: 10 } }]
+          - action: knx.send
+            data: { address: !input ga_status, payload: "{{ etat_bit }}" }
+      - conditions:
+          - condition: trigger
+            id: lecture
+          - "{{ ga_status != vide }}"
+        sequence:
+          - action: knx.send
+            data: { address: !input ga_status, payload: "{{ etat_bit }}", response: true }

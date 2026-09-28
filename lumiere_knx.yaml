@@ -1,0 +1,158 @@
+blueprint:
+  name: "Domo · Lumière variable / RGB ↔ KNX"
+  description: >
+    Relie une lumière (Matter, Zigbee, WiFi…) à des adresses de groupe KNX :
+    marche/arrêt, variation absolue et relative, couleur RGB, température de
+    couleur. Laisser une adresse à 31/7/254 = objet non utilisé.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Lumière
+      selector: { entity: { domain: light } }
+    ga_set:
+      name: "On/Off Set — W — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_status:
+      name: "On/Off Status — R,T — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_dim_set:
+      name: "Dimming Set (absolu) — W — 1 octet — DPT 5.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_dim_status:
+      name: "Dimming Status — R,T — 1 octet — DPT 5.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_dim_rel:
+      name: "Dimming relatif — W — 4 bits — DPT 3.007"
+      description: Un appui long = +/- 10 %
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_rgb_set:
+      name: "RGB Set — W — 3 octets — DPT 232.600"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_rgb_status:
+      name: "RGB Status — R,T — 3 octets — DPT 232.600"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_ct_set:
+      name: "Température de couleur Set — W — 2 octets — DPT 7.600 (Kelvin)"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_ct_status:
+      name: "Température de couleur Status — R,T — 2 octets — DPT 7.600"
+      default: "31/7/254"
+      selector: { text: {} }
+
+mode: queued
+max: 30
+
+variables:
+  entite: !input entite
+  vide: "31/7/254"
+  ga_status: !input ga_status
+  ga_dim_status: !input ga_dim_status
+  ga_rgb_status: !input ga_rgb_status
+  ga_ct_status: !input ga_ct_status
+  ga_dim_set: !input ga_dim_set
+  ga_dim_rel: !input ga_dim_rel
+  ga_rgb_set: !input ga_rgb_set
+  ga_ct_set: !input ga_ct_set
+  etat_bit: "{{ 1 if is_state(entite, 'on') else 0 }}"
+  niveau: "{{ ((state_attr(entite, 'brightness') or 0) / 255 * 100) | round | int if is_state(entite, 'on') else 0 }}"
+  rgb: "{{ state_attr(entite, 'rgb_color') or [0, 0, 0] }}"
+  kelvin: "{{ state_attr(entite, 'color_temp_kelvin') or 0 }}"
+
+triggers:
+  - trigger: knx.telegram
+    destination: [!input ga_set, !input ga_dim_set, !input ga_dim_rel, !input ga_rgb_set, !input ga_ct_set]
+    group_value_write: true
+    group_value_read: false
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: cmd
+  - trigger: knx.telegram
+    destination: [!input ga_status, !input ga_dim_status, !input ga_rgb_status, !input ga_ct_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: false
+    id: lecture
+  - trigger: state
+    entity_id: !input entite
+    id: etat
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+actions:
+  - choose:
+      - conditions: [{ condition: trigger, id: cmd }]
+        sequence:
+          - variables:
+              p: "{{ trigger.payload }}"
+              raw: "{{ (p[0] if p is iterable and p is not string else p) | int(0) }}"
+              dest: "{{ trigger.destination }}"
+          - choose:
+              - conditions: "{{ dest == ga_dim_set }}"
+                sequence:
+                  - if: "{{ raw == 0 }}"
+                    then: [{ action: light.turn_off, target: { entity_id: !input entite } }]
+                    else:
+                      - action: light.turn_on
+                        target: { entity_id: !input entite }
+                        data: { brightness_pct: "{{ (raw / 255 * 100) | round | int }}" }
+              - conditions: "{{ dest == ga_dim_rel }}"
+                sequence:
+                  - condition: template
+                    value_template: "{{ raw % 8 > 0 }}"
+                  - action: light.turn_on
+                    target: { entity_id: !input entite }
+                    data: { brightness_step_pct: "{{ 10 if raw // 8 == 1 else -10 }}" }
+              - conditions: "{{ dest == ga_rgb_set }}"
+                sequence:
+                  - action: light.turn_on
+                    target: { entity_id: !input entite }
+                    data: { rgb_color: "{{ p[:3] }}" }
+              - conditions: "{{ dest == ga_ct_set }}"
+                sequence:
+                  - action: light.turn_on
+                    target: { entity_id: !input entite }
+                    data: { color_temp_kelvin: "{{ p[0] * 256 + p[1] }}" }
+            default:
+              - action: "{{ 'light.turn_on' if raw == 1 else 'light.turn_off' }}"
+                target: { entity_id: !input entite }
+
+      - conditions:
+          - condition: trigger
+            id: [etat, demarrage]
+        sequence:
+          - if: [{ condition: trigger, id: demarrage }]
+            then: [{ delay: { seconds: 10 } }]
+          - if: "{{ ga_status != vide }}"
+            then: [{ action: knx.send, data: { address: !input ga_status, payload: "{{ etat_bit }}" } }]
+          - if: "{{ ga_dim_status != vide }}"
+            then: [{ action: knx.send, data: { address: !input ga_dim_status, payload: "{{ niveau }}", type: percent } }]
+          - if: "{{ ga_rgb_status != vide }}"
+            then: [{ action: knx.send, data: { address: !input ga_rgb_status, payload: "{{ rgb }}", type: color_rgb } }]
+          - if: "{{ ga_ct_status != vide and kelvin > 0 }}"
+            then: [{ action: knx.send, data: { address: !input ga_ct_status, payload: "{{ kelvin }}", type: color_temperature } }]
+
+      - conditions: [{ condition: trigger, id: lecture }]
+        sequence:
+          - variables: { dest: "{{ trigger.destination }}" }
+          - choose:
+              - conditions: "{{ dest == ga_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_status, payload: "{{ etat_bit }}", response: true } }]
+              - conditions: "{{ dest == ga_dim_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_dim_status, payload: "{{ niveau }}", type: percent, response: true } }]
+              - conditions: "{{ dest == ga_rgb_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_rgb_status, payload: "{{ rgb }}", type: color_rgb, response: true } }]
+              - conditions: "{{ dest == ga_ct_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_ct_status, payload: "{{ kelvin }}", type: color_temperature, response: true } }]

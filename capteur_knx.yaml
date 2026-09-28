@@ -1,0 +1,82 @@
+blueprint:
+  name: "Domo · Capteur / contact → KNX"
+  description: >
+    Publie l'état d'un capteur (contact de porte, température, humidité,
+    luminosité, CO2, présence…) sur une adresse de groupe KNX, avec réponse
+    aux lectures et envoi au démarrage.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Capteur
+      selector: { entity: { domain: [binary_sensor, sensor, input_number, number] } }
+    ga_status:
+      name: "Status — R,T — adresse de groupe"
+      selector: { text: {} }
+    dpt:
+      name: Type de donnée (DPT)
+      default: binary
+      selector:
+        select:
+          options:
+            - { label: "1 bit — contact / présence (DPT 1.x)", value: binary }
+            - { label: "Température °C (DPT 9.001)", value: temperature }
+            - { label: "Humidité % (DPT 9.007)", value: humidity }
+            - { label: "Luminosité lux (DPT 9.004)", value: illuminance }
+            - { label: "CO2 ppm (DPT 9.008)", value: ppm }
+            - { label: "Pourcentage 0-100 % (DPT 5.001)", value: percent }
+            - { label: "Entier 0-255 (DPT 5.010)", value: 1byte_unsigned }
+            - { label: "Puissance W (DPT 14.056)", value: power }
+            - { label: "Tension V (DPT 14.027)", value: electric_potential }
+            - { label: "Courant A (DPT 14.019)", value: electric_current }
+            - { label: "Énergie Wh (DPT 13.010)", value: active_energy }
+            - { label: "Texte 14 caractères (DPT 16.000)", value: string }
+
+mode: queued
+max: 20
+
+variables:
+  entite: !input entite
+  dpt: !input dpt
+  valeur: >-
+    {% set s = states(entite) %}
+    {% if dpt == 'binary' %}{{ 1 if s in ['on', 'open', 'true', '1'] else 0 }}
+    {% elif dpt == 'string' %}{{ (s | string)[:14] }}
+    {% else %}{{ s | float(0) }}{% endif %}
+
+triggers:
+  - trigger: state
+    entity_id: !input entite
+    id: etat
+  - trigger: knx.telegram
+    destination: [!input ga_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: false
+    id: lecture
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+conditions:
+  - "{{ states(entite) not in ['unknown', 'unavailable'] }}"
+
+actions:
+  - if: [{ condition: trigger, id: demarrage }]
+    then: [{ delay: { seconds: 10 } }]
+  - if: "{{ dpt == 'binary' }}"
+    then:
+      - action: knx.send
+        data:
+          address: !input ga_status
+          payload: "{{ valeur }}"
+          response: "{{ trigger.id == 'lecture' }}"
+    else:
+      - action: knx.send
+        data:
+          address: !input ga_status
+          payload: "{{ valeur }}"
+          type: "{{ dpt }}"
+          response: "{{ trigger.id == 'lecture' }}"

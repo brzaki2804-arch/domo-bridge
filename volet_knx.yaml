@@ -1,0 +1,114 @@
+blueprint:
+  name: "Domo · Volet / store ↔ KNX"
+  description: >
+    Relie un volet ou un store (Matter, Zigbee…) à des adresses de groupe KNX.
+    Convention KNX : 0 = monter/ouvert, 1 = descendre ; position 0 % = ouvert,
+    100 % = fermé. Laisser une adresse à 31/7/254 = objet non utilisé.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Volet
+      selector: { entity: { domain: cover } }
+    ga_move:
+      name: "Up/Down — W — 1 bit — DPT 1.008"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_stop:
+      name: "Stop / Step — W — 1 bit — DPT 1.007"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_pos_set:
+      name: "Position Set — W — 1 octet — DPT 5.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_pos_status:
+      name: "Position Status — R,T — 1 octet — DPT 5.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_moving_status:
+      name: "En mouvement Status — R,T — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+
+mode: queued
+max: 20
+
+variables:
+  entite: !input entite
+  vide: "31/7/254"
+  ga_move: !input ga_move
+  ga_stop: !input ga_stop
+  ga_pos_set: !input ga_pos_set
+  ga_pos_status: !input ga_pos_status
+  ga_moving_status: !input ga_moving_status
+  # KNX 0 % = ouvert, HA current_position 100 = ouvert
+  pos_knx: "{{ 100 - (state_attr(entite, 'current_position') | int(0)) }}"
+  en_mouvement: "{{ 1 if states(entite) in ['opening', 'closing'] else 0 }}"
+
+triggers:
+  - trigger: knx.telegram
+    destination: [!input ga_move, !input ga_stop, !input ga_pos_set]
+    group_value_write: true
+    group_value_read: false
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: cmd
+  - trigger: knx.telegram
+    destination: [!input ga_pos_status, !input ga_moving_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: false
+    id: lecture
+  - trigger: state
+    entity_id: !input entite
+    id: etat
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+actions:
+  - choose:
+      - conditions: [{ condition: trigger, id: cmd }]
+        sequence:
+          - variables:
+              p: "{{ trigger.payload }}"
+              raw: "{{ (p[0] if p is iterable and p is not string else p) | int(0) }}"
+              dest: "{{ trigger.destination }}"
+          - choose:
+              - conditions: "{{ dest == ga_move }}"
+                sequence:
+                  - action: "{{ 'cover.close_cover' if raw == 1 else 'cover.open_cover' }}"
+                    target: { entity_id: !input entite }
+              - conditions: "{{ dest == ga_stop }}"
+                sequence:
+                  - action: cover.stop_cover
+                    target: { entity_id: !input entite }
+              - conditions: "{{ dest == ga_pos_set }}"
+                sequence:
+                  - action: cover.set_cover_position
+                    target: { entity_id: !input entite }
+                    data: { position: "{{ 100 - (raw / 255 * 100) | round | int }}" }
+
+      - conditions:
+          - condition: trigger
+            id: [etat, demarrage]
+        sequence:
+          - if: [{ condition: trigger, id: demarrage }]
+            then: [{ delay: { seconds: 10 } }]
+          - if: "{{ ga_pos_status != vide }}"
+            then: [{ action: knx.send, data: { address: !input ga_pos_status, payload: "{{ pos_knx }}", type: percent } }]
+          - if: "{{ ga_moving_status != vide }}"
+            then: [{ action: knx.send, data: { address: !input ga_moving_status, payload: "{{ en_mouvement }}" } }]
+
+      - conditions: [{ condition: trigger, id: lecture }]
+        sequence:
+          - variables: { dest: "{{ trigger.destination }}" }
+          - choose:
+              - conditions: "{{ dest == ga_pos_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_pos_status, payload: "{{ pos_knx }}", type: percent, response: true } }]
+              - conditions: "{{ dest == ga_moving_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_moving_status, payload: "{{ en_mouvement }}", response: true } }]

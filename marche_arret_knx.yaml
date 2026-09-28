@@ -1,0 +1,81 @@
+blueprint:
+  name: "Domo · Marche/arrêt ↔ KNX"
+  description: >
+    Relie un appareil marche/arrêt (prise, relais, vanne, lumière simple…)
+    à des adresses de groupe KNX, comme le « Bridge Devices to KNX » du 1Home.
+    Laisser une adresse à 31/7/254 = objet non utilisé.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Appareil
+      selector:
+        entity:
+          domain: [switch, light, input_boolean, fan, valve, siren]
+    ga_set:
+      name: "On/Off Set — W — 1 bit — DPT 1.001"
+      description: Adresse de commande (1 = marche, 0 = arrêt)
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_status:
+      name: "On/Off Status — R,T — 1 bit — DPT 1.001"
+      description: Adresse de retour d'état
+      default: "31/7/254"
+      selector: { text: {} }
+
+mode: queued
+max: 20
+
+variables:
+  entite: !input entite
+  ga_status: !input ga_status
+  vide: "31/7/254"
+  etat_bit: "{{ 1 if is_state(entite, 'on') else 0 }}"
+
+triggers:
+  - trigger: knx.telegram
+    destination: [!input ga_set]
+    group_value_write: true
+    group_value_read: false
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: cmd
+  - trigger: knx.telegram
+    destination: [!input ga_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: false
+    id: lecture
+  - trigger: state
+    entity_id: !input entite
+    to: ["on", "off"]
+    id: etat
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+actions:
+  - choose:
+      - conditions: [{ condition: trigger, id: cmd }]
+        sequence:
+          - action: "{{ 'homeassistant.turn_on' if trigger.payload == 1 else 'homeassistant.turn_off' }}"
+            target: { entity_id: !input entite }
+      - conditions:
+          - condition: trigger
+            id: [etat, demarrage]
+          - "{{ ga_status != vide }}"
+        sequence:
+          - if: [{ condition: trigger, id: demarrage }]
+            then: [{ delay: { seconds: 10 } }]
+          - action: knx.send
+            data: { address: !input ga_status, payload: "{{ etat_bit }}" }
+      - conditions:
+          - condition: trigger
+            id: lecture
+          - "{{ ga_status != vide }}"
+        sequence:
+          - action: knx.send
+            data: { address: !input ga_status, payload: "{{ etat_bit }}", response: true }
