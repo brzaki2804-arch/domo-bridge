@@ -64,7 +64,7 @@ variables:
   ga_ct_set: !input ga_ct_set
   etat_bit: "{{ 1 if is_state(entite, 'on') else 0 }}"
   niveau: "{{ ((state_attr(entite, 'brightness') or 0) / 255 * 100) | round | int if is_state(entite, 'on') else 0 }}"
-  rgb: "{{ state_attr(entite, 'rgb_color') or [0, 0, 0] }}"
+  rgb: "{% set c = state_attr(entite, 'rgb_color') or [0, 0, 0] %}{{ {'red': c[0], 'green': c[1], 'blue': c[2]} }}"
   kelvin: "{{ state_attr(entite, 'color_temp_kelvin') or 0 }}"
 
 triggers:
@@ -82,7 +82,7 @@ triggers:
     group_value_read: true
     group_value_response: false
     incoming: true
-    outgoing: false
+    outgoing: true
     id: lecture
   - trigger: state
     entity_id: !input entite

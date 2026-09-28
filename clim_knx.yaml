@@ -1,0 +1,212 @@
+blueprint:
+  name: "Domo · Climatisation ↔ KNX"
+  description: >
+    Relie une climatisation connectée (LG ThinQ, Daikin, Matter…) à des adresses
+    de groupe KNX : marche/arrêt, mode, consigne, température ambiante,
+    ventilation, oscillation. Laisser une adresse à 31/7/254 = objet non utilisé.
+    Mode (DPT 20.105) : 0 = auto, 1 = chaud, 3 = froid, 9 = ventilation, 14 = déshumidification.
+    Ventilation (1 octet) : 0 = auto, puis 1, 2, 3… dans l'ordre des vitesses de l'appareil.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Climatisation
+      selector: { entity: { domain: climate } }
+    ga_onoff:
+      name: "On/Off Set — W — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_onoff_status:
+      name: "On/Off Status — R,T — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_mode:
+      name: "Mode Set — W — 1 octet — DPT 20.105"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_mode_status:
+      name: "Mode Status — R,T — 1 octet — DPT 20.105"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_consigne:
+      name: "Consigne Set — W — 2 octets — DPT 9.001 (°C)"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_consigne_status:
+      name: "Consigne Status — R,T — 2 octets — DPT 9.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_temp_status:
+      name: "Température ambiante — R,T — 2 octets — DPT 9.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_fan:
+      name: "Ventilation Set — W — 1 octet — DPT 5.010"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_fan_status:
+      name: "Ventilation Status — R,T — 1 octet — DPT 5.010"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_swing:
+      name: "Oscillation Set — W — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+    ga_swing_status:
+      name: "Oscillation Status — R,T — 1 bit — DPT 1.001"
+      default: "31/7/254"
+      selector: { text: {} }
+
+mode: queued
+max: 30
+
+variables:
+  e: !input entite
+  vide: "31/7/254"
+  ga_onoff: !input ga_onoff
+  ga_mode: !input ga_mode
+  ga_consigne: !input ga_consigne
+  ga_fan: !input ga_fan
+  ga_swing: !input ga_swing
+  ga_onoff_status: !input ga_onoff_status
+  ga_mode_status: !input ga_mode_status
+  ga_consigne_status: !input ga_consigne_status
+  ga_temp_status: !input ga_temp_status
+  ga_fan_status: !input ga_fan_status
+  ga_swing_status: !input ga_swing_status
+  # DPT 20.105 HVAC control mode
+  mode_knx: "{{ {'auto': 0, 'heat': 1, 'cool': 3, 'fan_only': 9, 'dry': 14, 'heat_cool': 0}.get(states(e), 0) }}"
+  marche: "{{ 0 if states(e) in ['off', 'unavailable', 'unknown'] else 1 }}"
+  consigne: "{{ state_attr(e, 'temperature') or 0 }}"
+  ambiante: "{{ state_attr(e, 'current_temperature') or 0 }}"
+  fans: "{{ state_attr(e, 'fan_modes') or [] }}"
+  fan_knx: >-
+    {% set f = state_attr(e, 'fan_mode') %}{% set autos = ['auto', 'off'] %}
+    {% if f in autos or f is none %}0{% else %}{% set l = fans | reject('in', autos) | list %}{{ (l.index(f) + 1) if f in l else 0 }}{% endif %}
+  swing: "{{ 1 if state_attr(e, 'swing_mode') not in ['off', none] else 0 }}"
+
+triggers:
+  - trigger: knx.telegram
+    destination: [!input ga_onoff, !input ga_mode, !input ga_consigne, !input ga_fan, !input ga_swing]
+    group_value_write: true
+    group_value_read: false
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: cmd
+  - trigger: knx.telegram
+    destination: [!input ga_onoff_status, !input ga_mode_status, !input ga_consigne_status, !input ga_temp_status, !input ga_fan_status, !input ga_swing_status]
+    group_value_write: false
+    group_value_read: true
+    group_value_response: false
+    incoming: true
+    outgoing: true
+    id: lecture
+  - trigger: state
+    entity_id: !input entite
+    id: etat
+  - trigger: homeassistant
+    event: start
+    id: demarrage
+
+actions:
+  - choose:
+      - conditions: [{ condition: trigger, id: cmd }]
+        sequence:
+          - variables:
+              p: "{{ trigger.payload }}"
+              raw: "{{ (p[0] if p is iterable and p is not string else p) | int(0) }}"
+              dest: "{{ trigger.destination }}"
+          - choose:
+              - conditions: "{{ dest == ga_onoff }}"
+                sequence:
+                  - action: "{{ 'climate.turn_on' if raw == 1 else 'climate.turn_off' }}"
+                    target: { entity_id: !input entite }
+              - conditions: "{{ dest == ga_mode }}"
+                sequence:
+                  - variables:
+                      m: "{{ {0: 'auto', 1: 'heat', 3: 'cool', 9: 'fan_only', 14: 'dry'}.get(raw, 'auto') }}"
+                  - condition: template
+                    value_template: "{{ m in (state_attr(e, 'hvac_modes') or []) }}"
+                  - action: climate.set_hvac_mode
+                    target: { entity_id: !input entite }
+                    data: { hvac_mode: "{{ m }}" }
+              - conditions: "{{ dest == ga_consigne }}"
+                sequence:
+                  - variables:
+                      # DPT 9 : 2 octets, décodé ici (mantisse 11 bits signée, exposant 4 bits)
+                      t: >-
+                        {% set hi = p[0] %}{% set lo = p[1] %}{% set exp = (hi // 8) % 16 %}
+                        {% set m = ((hi % 8) * 256 + lo) %}{% set m = m - 2048 if hi >= 128 else m %}
+                        {{ (m * 0.01 * (2 ** exp)) | round(1) }}
+                  - condition: template
+                    value_template: "{{ (state_attr(e, 'min_temp') or 5) <= t <= (state_attr(e, 'max_temp') or 35) }}"
+                  - action: climate.set_temperature
+                    target: { entity_id: !input entite }
+                    data: { temperature: "{{ t }}" }
+              - conditions: "{{ dest == ga_fan }}"
+                sequence:
+                  - variables:
+                      l: "{{ fans | reject('in', ['auto', 'off']) | list }}"
+                      f: "{{ ('auto' if 'auto' in fans else (fans[0] if fans else none)) if raw == 0 else (l[raw - 1] if 1 <= raw <= l | length else none) }}"
+                  - condition: template
+                    value_template: "{{ f is not none and f != 'None' }}"
+                  - action: climate.set_fan_mode
+                    target: { entity_id: !input entite }
+                    data: { fan_mode: "{{ f }}" }
+              - conditions: "{{ dest == ga_swing }}"
+                sequence:
+                  - variables:
+                      s: "{{ state_attr(e, 'swing_modes') or [] }}"
+                      v: "{{ ('on' if 'on' in s else (s | reject('eq', 'off') | first)) if raw == 1 else 'off' }}"
+                  - condition: template
+                    value_template: "{{ v in s }}"
+                  - action: climate.set_swing_mode
+                    target: { entity_id: !input entite }
+                    data: { swing_mode: "{{ v }}" }
+          # Certaines clims cloud (LG ThinQ) ne poussent pas toujours leur état :
+          # on force une relecture 3 s après l'ordre pour que le bus soit à jour.
+          - delay: { seconds: 3 }
+          - action: homeassistant.update_entity
+            target: { entity_id: !input entite }
+            continue_on_error: true
+
+      - conditions:
+          - condition: trigger
+            id: [etat, demarrage]
+        sequence:
+          - if: [{ condition: trigger, id: demarrage }]
+            then: [{ delay: { seconds: 10 } }]
+          - variables:
+              avant: "{{ trigger.from_state.attributes if trigger.id == 'etat' and trigger.from_state else {} }}"
+              etat_avant: "{{ trigger.from_state.state if trigger.id == 'etat' and trigger.from_state else '' }}"
+              demarre: "{{ trigger.id == 'demarrage' }}"
+          - if: "{{ ga_onoff_status != vide and (demarre or etat_avant != states(e)) }}"
+            then: [{ action: knx.send, data: { address: !input ga_onoff_status, payload: "{{ marche }}" } }]
+          - if: "{{ ga_mode_status != vide and (demarre or etat_avant != states(e)) }}"
+            then: [{ action: knx.send, data: { address: !input ga_mode_status, payload: "{{ mode_knx }}", type: hvac_controller_mode } }]
+          - if: "{{ ga_consigne_status != vide and (demarre or avant.temperature != state_attr(e, 'temperature')) and consigne }}"
+            then: [{ action: knx.send, data: { address: !input ga_consigne_status, payload: "{{ consigne }}", type: temperature } }]
+          - if: "{{ ga_temp_status != vide and (demarre or avant.current_temperature != state_attr(e, 'current_temperature')) and ambiante }}"
+            then: [{ action: knx.send, data: { address: !input ga_temp_status, payload: "{{ ambiante }}", type: temperature } }]
+          - if: "{{ ga_fan_status != vide and (demarre or avant.fan_mode != state_attr(e, 'fan_mode')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_fan_status, payload: "{{ fan_knx }}", type: 1byte_unsigned } }]
+          - if: "{{ ga_swing_status != vide and (demarre or avant.swing_mode != state_attr(e, 'swing_mode')) }}"
+            then: [{ action: knx.send, data: { address: !input ga_swing_status, payload: "{{ swing }}" } }]
+
+      - conditions: [{ condition: trigger, id: lecture }]
+        sequence:
+          - variables: { dest: "{{ trigger.destination }}" }
+          - choose:
+              - conditions: "{{ dest == ga_onoff_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_onoff_status, payload: "{{ marche }}", response: true } }]
+              - conditions: "{{ dest == ga_mode_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_mode_status, payload: "{{ mode_knx }}", type: hvac_controller_mode, response: true } }]
+              - conditions: "{{ dest == ga_consigne_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_consigne_status, payload: "{{ consigne }}", type: temperature, response: true } }]
+              - conditions: "{{ dest == ga_temp_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_temp_status, payload: "{{ ambiante }}", type: temperature, response: true } }]
+              - conditions: "{{ dest == ga_fan_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_fan_status, payload: "{{ fan_knx }}", type: 1byte_unsigned, response: true } }]
+              - conditions: "{{ dest == ga_swing_status }}"
+                sequence: [{ action: knx.send, data: { address: !input ga_swing_status, payload: "{{ swing }}", response: true } }]

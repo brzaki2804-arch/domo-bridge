@@ -47,7 +47,7 @@ triggers:
     group_value_read: true
     group_value_response: false
     incoming: true
-    outgoing: false
+    outgoing: true
     id: lecture
   - trigger: state
     entity_id: !input entite

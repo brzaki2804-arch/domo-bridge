@@ -110,7 +110,7 @@ triggers:
     group_value_read: true
     group_value_response: false
     incoming: true
-    outgoing: false
+    outgoing: true
     id: lecture_ga
   - trigger: state
     entity_id: !input entite
