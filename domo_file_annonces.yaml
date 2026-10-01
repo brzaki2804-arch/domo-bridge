@@ -1,0 +1,168 @@
+# Script Home Assistant « Domo · File annonces » (entité script.domo_file_annonces),
+# à créer une seule fois par maison : Paramètres > Automatisations et scènes >
+# Scripts > Créer > Modifier en YAML, coller ce contenu, enregistrer SANS changer
+# le nom : Home Assistant tire l'identifiant du nom (« Domo · File annonces » →
+# script.domo_file_annonces). Vérifier ensuite que l'adresse finit par
+# /config/script/edit/domo_file_annonces (sinon : roue dentée > ID d'entité).
+# Utilisé par le modèle « Domo · Annonce vocale d'état ».
+alias: "Domo · File annonces"
+description: >-
+  File d'attente des annonces vocales : les joue une par une sur les enceintes
+  Music Assistant, relance la musique interrompue si Music Assistant ne l'a pas
+  fait, remet le volume et remet à l'arrêt les enceintes HEOS restées bloquées
+  en « lecture ». Une annonce qui a attendu plus d'une minute est sautée.
+icon: mdi:bullhorn-variant
+mode: queued
+max: 50
+max_exceeded: warning
+fields:
+  enceintes:
+    name: Enceintes
+    required: true
+    selector: { entity: { domain: media_player, multiple: true } }
+  url:
+    name: Message (media-source://tts/…)
+    required: true
+    selector: { text: {} }
+  volume:
+    name: Volume (%)
+    description: Doit rester dans les bornes d'annonce de chaque enceinte dans Music Assistant (15-75 % par défaut).
+    default: 40
+    selector: { number: { min: 15, max: 75 } }
+  carillon:
+    name: Carillon
+    default: true
+    selector: { boolean: {} }
+  emis:
+    name: Heure d'émission (horodatage, facultatif)
+    selector: { text: {} }
+sequence:
+  # Rafale (« Tout éteindre ») : une annonce qui a attendu plus d'une minute n'a
+  # plus de sens, on la saute. Sans horodatage (ancien appelant), on la joue.
+  - condition: template
+    value_template: "{{ (emis | float(0)) == 0 or now().timestamp() - (emis | float(0)) < 60 }}"
+  - variables:
+      liste: "{{ [enceintes] if enceintes is string else enceintes }}"
+      # Enceintes regroupées : si le meneur d'un groupe HEOS, ou un groupe Music
+      # Assistant, est déjà visé, ses membres entendent l'annonce par lui ; les
+      # viser aussi la ferait dire deux fois.
+      cibles: >-
+        {%- set ns = namespace(l=[]) -%}
+        {%- for e in liste -%}
+        {%- set g = state_attr(e, 'group_members') or [] -%}
+        {%- set dans_groupe = namespace(v=false) -%}
+        {%- for x in liste if x != e and is_state_attr(x, 'mass_player_type', 'group') and e in (state_attr(x, 'group_members') or []) -%}{%- set dans_groupe.v = true -%}{%- endfor -%}
+        {%- if not dans_groupe.v and not (g | count > 1 and e in g and g[0] != e and g[0] in liste) -%}{%- set ns.l = ns.l + [e] -%}{%- endif -%}
+        {%- endfor -%}{{ ns.l }}
+      # Lues au moment où cette annonce commence, donc après la précédente.
+      # Une enceinte en pause est arrêtée par Music Assistant et jamais relancée :
+      # elle finit comme une enceinte à l'arrêt.
+      muettes: "{{ cibles | reject('is_state', ['playing', 'buffering']) | list }}"
+      jouaient: "{{ cibles | select('is_state', 'playing') | list }}"
+      # Ce qu'affichent les enceintes muettes (avec Music Assistant : l'élément de
+      # leur file, jamais l'annonce elle-même).
+      contenu_avant: >-
+        {%- set ns = namespace(l=[]) -%}
+        {%- for s in expand(muettes) -%}
+        {%- set ns.l = ns.l + [s.entity_id ~ '|' ~ (s.attributes.get('media_content_id') or '') ~ '|' ~ (s.attributes.get('media_title') or '')] -%}
+        {%- endfor -%}{{ ns.l }}
+      # Volumes d'avant, y compris ceux des membres d'un groupe dont le meneur est
+      # visé : Music Assistant leur applique aussi le volume d'annonce.
+      volumes_avant: >-
+        {%- set ns = namespace(l=[], vus=[]) -%}
+        {%- for c in cibles -%}
+        {%- set g = state_attr(c, 'group_members') or [] -%}
+        {%- set touchees = g if (g | count > 1 and g[0] == c) else [c] -%}
+        {%- for e in touchees -%}
+        {%- if e not in ns.vus -%}
+        {%- set ns.vus = ns.vus + [e] -%}
+        {%- set v = state_attr(e, 'volume_level') -%}
+        {%- if v is number -%}{%- set ns.l = ns.l + [[e, v]] -%}{%- endif -%}
+        {%- endif -%}
+        {%- endfor -%}
+        {%- endfor -%}{{ ns.l }}
+  - action: media_player.play_media
+    # Une enceinte en erreur ne doit pas empêcher la suite pour les autres.
+    continue_on_error: true
+    target:
+      entity_id: "{{ cibles }}"
+    data:
+      media_content_id: "{{ url }}"
+      media_content_type: music
+      announce: true
+      extra:
+        announce_volume: "{{ volume | int(40) }}"
+        use_pre_announce: "{{ carillon | bool(true) }}"
+  - variables:
+      fin_annonce: "{{ now().timestamp() }}"
+  # Musique interrompue : Music Assistant la relance 3 à 4 s après l'annonce…
+  # ou pas (HEOS). On attend qu'elle reparte, on la relance sinon, puis on la
+  # laisse s'installer avant l'annonce suivante de la file : une HEOS coupée
+  # juste après la reprise ne relance plus la musique (« Unsupported format »).
+  - if: "{{ jouaient | count > 0 }}"
+    then:
+      - delay: { seconds: 3 }
+      - wait_template: "{{ jouaient | reject('is_state', 'playing') | list | count == 0 }}"
+        timeout: "00:00:08"
+        continue_on_timeout: true
+      # Seules les enceintes restées à l'arrêt sont relancées : une enceinte en
+      # pause ou éteinte l'a été volontairement. (Un Stop pendant l'annonce laisse
+      # « idle » comme une reprise ratée : indiscernable, la musique repartira.)
+      - variables:
+          a_relancer: "{{ jouaient | select('is_state', 'idle') | list }}"
+      - if: "{{ a_relancer | count > 0 }}"
+        then:
+          - action: media_player.media_play
+            continue_on_error: true
+            target:
+              entity_id: "{{ a_relancer }}"
+          - wait_template: "{{ a_relancer | reject('is_state', 'playing') | list | count == 0 }}"
+            timeout: "00:00:10"
+            continue_on_timeout: true
+      - delay: { seconds: 5 }
+  - if: "{{ muettes | count > 0 }}"
+    then:
+      - delay: { seconds: 5 }
+      # Seules les enceintes restées bloquées sont arrêtées : toujours « en
+      # lecture » depuis l'annonce et affichant la même chose qu'avant. Une
+      # musique lancée pendant ou juste après l'annonce n'est pas coupée.
+      - variables:
+          a_arreter: >-
+            {%- set ns = namespace(l=[]) -%}
+            {%- for s in expand(muettes) -%}
+            {%- set cle = s.entity_id ~ '|' ~ (s.attributes.get('media_content_id') or '') ~ '|' ~ (s.attributes.get('media_title') or '') -%}
+            {%- if s.state == 'playing'
+                  and as_timestamp(s.last_changed, 0) < (fin_annonce | float(0)) + 2
+                  and cle in contenu_avant -%}
+            {%- set ns.l = ns.l + [s.entity_id] -%}{%- endif -%}
+            {%- endfor -%}{{ ns.l }}
+      - if: "{{ a_arreter | count > 0 }}"
+        then:
+          - action: media_player.media_stop
+            continue_on_error: true
+            target:
+              entity_id: "{{ a_arreter }}"
+  # Volume resté au niveau de l'annonce (reprise ratée) : on remet le volume
+  # d'avant. Music Assistant borne le volume d'annonce (15-75 % par défaut) :
+  # on reconnaît la valeur demandée et la valeur bornée.
+  - variables:
+      volume_demande: "{{ (volume | int(40)) / 100 }}"
+      volume_borne: "{{ ([[volume | int(40), 15] | max, 75] | min) / 100 }}"
+      a_remettre: >-
+        {%- set ns = namespace(l=[]) -%}
+        {%- for p in volumes_avant -%}
+        {%- set actuel = state_attr(p[0], 'volume_level') -%}
+        {%- if actuel is number and (actuel - p[1]) | abs >= 0.015
+              and ((actuel - volume_demande) | abs < 0.015 or (actuel - volume_borne) | abs < 0.015) -%}
+        {%- set ns.l = ns.l + [p] -%}{%- endif -%}
+        {%- endfor -%}{{ ns.l }}
+  - repeat:
+      for_each: "{{ a_remettre }}"
+      sequence:
+        - action: media_player.volume_set
+          continue_on_error: true
+          target:
+            entity_id: "{{ repeat.item[0] }}"
+          data:
+            # Music Assistant tronque (int(v * 100)) : 0.29 donnerait 28 %.
+            volume_level: "{{ [repeat.item[1] + 0.005, 1] | min }}"

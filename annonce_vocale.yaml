@@ -1,0 +1,341 @@
+blueprint:
+  name: "Domo · Annonce vocale d'état"
+  description: >
+    Annonce à voix haute, sur une ou plusieurs enceintes Music Assistant, le
+    changement d'état d'un appareil (lumière, prise, volet, clim, serrure,
+    porte…). Exemple : « Éclairage du bureau allumé ». La musique en cours est
+    baissée pendant l'annonce puis reprend.
+    Les annonces de toutes les automatisations passent par le script
+    « Domo · File annonces » : elles sont dites l'une après l'autre, jamais en
+    même temps ; les alarmes (fumée, gaz, fuite…) passent devant.
+    Dans les messages personnalisés, {nom} est remplacé par le nom de l'appareil.
+  domain: automation
+  author: Domo DZ
+  input:
+    entite:
+      name: Appareil à annoncer
+      selector:
+        entity:
+          domain: [light, switch, fan, input_boolean, cover, climate, lock, binary_sensor]
+    nom:
+      name: Nom prononcé (facultatif)
+      description: Laisser vide pour utiliser le nom de l'appareil dans Home Assistant.
+      default: ""
+      selector: { text: {} }
+    genre:
+      name: Accord du message automatique
+      description: >-
+        « Automatique » accorde d'après le premier mot du nom (« Porte d'entrée
+        ouverte », « Volet salon fermé »), sinon d'après le type d'appareil.
+        Choisir « Masculin » ou « Féminin » si le résultat n'est pas bon. Sans
+        effet sur les messages personnalisés.
+      default: auto
+      selector:
+        select:
+          options:
+            - { label: "Automatique", value: auto }
+            - { label: "Masculin (le volet, l'éclairage, le climatiseur…)", value: m }
+            - { label: "Féminin (la porte, la lumière, la prise, la clim…)", value: f }
+    enceintes:
+      name: Enceinte(s)
+      description: >-
+        Lecteurs Music Assistant (ceux qui finissent souvent par « _2 »). Un groupe
+        Music Assistant suffit : inutile d'y ajouter ses enceintes.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - integration: music_assistant
+              domain: media_player
+    quand:
+      name: Quand annoncer
+      default: les_deux
+      selector:
+        select:
+          options:
+            - { label: "À l'allumage / ouverture et à l'extinction / fermeture", value: les_deux }
+            - { label: "Seulement à l'allumage / ouverture", value: marche }
+            - { label: "Seulement à l'extinction / fermeture", value: arret }
+    message_marche:
+      name: Message à l'allumage / ouverture (facultatif)
+      description: >-
+        Exemple : « {nom} allumé, bonne journée ». Vide = message automatique,
+        toujours dit en français. Un message écrit en arabe est lu par la voix
+        arabe ; pour l'anglais, choisir la langue dans « Réglages avancés ».
+      default: ""
+      selector: { text: {} }
+    message_arret:
+      name: Message à l'extinction / fermeture (facultatif)
+      description: >-
+        Exemple : « {nom} éteint ». Vide = message automatique, toujours dit en
+        français. Un message écrit en arabe est lu par la voix arabe ; pour
+        l'anglais, choisir la langue dans « Réglages avancés ».
+      default: ""
+      selector: { text: {} }
+    volume:
+      name: Volume de l'annonce (%)
+      description: >-
+        Music Assistant borne le volume des annonces entre 15 et 75 % par défaut
+        (Music Assistant > Paramètres > Lecteurs > l'enceinte > Annonces). Si ces
+        bornes sont changées pour une enceinte, choisir ici un volume compris
+        dedans.
+      default: 40
+      selector: { number: { min: 15, max: 75, step: 5, unit_of_measurement: "%", mode: slider } }
+    carillon:
+      name: Carillon avant l'annonce
+      default: true
+      selector: { boolean: {} }
+    heure_debut:
+      name: Annonces à partir de
+      default: "07:00:00"
+      selector: { time: {} }
+    heure_fin:
+      name: Annonces jusqu'à
+      default: "22:00:00"
+      selector: { time: {} }
+    avance:
+      name: Réglages avancés
+      icon: mdi:cog
+      collapsed: true
+      input:
+        langue:
+          name: Langue des messages personnalisés
+          description: >-
+            La voix lit le texte tel quel, sans traduire. Les messages automatiques
+            sont toujours dits en français, un message écrit en arabe est reconnu
+            tout seul. Choisir « Anglais » pour des messages personnalisés en
+            anglais (et le « Nom prononcé » dans la même langue si {nom} est utilisé).
+          default: fr
+          selector:
+            select:
+              options:
+                - { label: Français, value: fr }
+                - { label: Arabe, value: ar }
+                - { label: Anglais, value: en }
+        moteur_tts:
+          name: Voix (moteur de synthèse vocale)
+          description: >-
+            Laisser tel quel (Google Translate). Le « en com » du nom ne change pas
+            la langue, réglée juste au-dessus.
+          default: tts.google_translate_en_com
+          selector: { entity: { domain: tts } }
+        file_annonces:
+          name: File d'attente des annonces
+          description: >-
+            Script « Domo · File annonces » (créé une seule fois pour toute la
+            maison). S'il manque, une notification le signale et l'annonce est
+            jouée directement, sans file d'attente, sans reprise de la musique ni
+            remise du volume.
+          default: script.domo_file_annonces
+          selector: { entity: { domain: script } }
+
+mode: restart
+
+variables:
+  entite: !input entite
+  nom_saisi: !input nom
+  genre: !input genre
+  quand: !input quand
+  message_marche: !input message_marche
+  message_arret: !input message_arret
+  langue: !input langue
+  volume: !input volume
+  carillon: !input carillon
+  enceintes: !input enceintes
+  file_annonces: !input file_annonces
+  moteur_choisi: !input moteur_tts
+  # Si la voix choisie n'existe plus, on prend la première voix disponible.
+  moteur_tts: >-
+    {% set dispo = states.tts | map(attribute='entity_id') | list %}
+    {{ moteur_choisi if moteur_choisi in dispo
+       else (dispo | first if dispo | count > 0 else moteur_choisi) }}
+  domaine: "{{ entite.split('.')[0] }}"
+  classe: "{{ state_attr(entite, 'device_class') or '' }}"
+  # États « allumé / ouvert / déverrouillé / clim en service »
+  cote_marche: ["on", "open", "unlocked", "heat", "cool", "auto", "heat_cool", "dry", "fan_only"]
+  alarmes: ["smoke", "gas", "carbon_monoxide", "moisture", "safety"]
+
+triggers:
+  - trigger: state
+    entity_id: !input entite
+    not_from: ["unavailable", "unknown"]
+    not_to: ["unavailable", "unknown"]
+
+conditions:
+  - "{{ trigger.from_state is not none and trigger.to_state is not none }}"
+  - "{{ trigger.from_state.state != trigger.to_state.state }}"
+  # Volet : annoncé seulement quand il quitte la position fermée (ouverture) ou
+  # quand il l'atteint (fermeture) ; un réglage partiel n'est pas annoncé.
+  - "{{ domaine != 'cover' or trigger.from_state.state == 'closed' or trigger.to_state.state == 'closed' }}"
+  # Serrure : c'est le passage vers « opening » qui annonce (il attend la suite) ;
+  # la sortie d'« opening » et le retour seul de la gâche (open → unlocked) se taisent.
+  - "{{ not (domaine == 'lock' and (trigger.from_state.state == 'opening' or (trigger.from_state.state == 'open' and trigger.to_state.state == 'unlocked'))) }}"
+  # Capteur à impulsion (sonnette, bouton) : un retour qui ne sera pas annoncé ne
+  # doit pas annuler (mode restart) l'annonce de l'événement.
+  - "{{ domaine != 'binary_sensor' or quand == 'les_deux' or (quand == 'marche') == (trigger.to_state.state == 'on') }}"
+  # Démarrage de Home Assistant ou reconnexion KNX : une lumière KNX renaît
+  # « éteinte » puis passe à « allumée » quand le bus répond. Ce faux changement
+  # est ignoré : l'état précédent est né avec l'automatisation (moins de 3 s
+  # d'écart) ou juste après la connexion KNX, il y a moins de 90 s. Un changement
+  # venu d'un utilisateur, d'une automatisation ou d'une alarme passe toujours.
+  - condition: template
+    value_template: >-
+      {%- set maintenant = now().timestamp() -%}
+      {%- set cree = as_timestamp(this.last_changed, 0) if this is defined and this else 0 -%}
+      {%- set avant = as_timestamp(trigger.from_state.last_changed, 0) -%}
+      {%- set ctx = trigger.to_state.context -%}
+      {%- set alarme = domaine == 'binary_sensor' and classe in alarmes -%}
+      {%- set knx_ts = expand(integration_entities('knx') | select('match', 'sensor[.]') | list)
+           | selectattr('attributes.device_class', 'defined')
+           | selectattr('attributes.device_class', 'eq', 'timestamp')
+           | map(attribute='state') | list -%}
+      {%- set knx = as_timestamp(knx_ts | first, 0) if knx_ts | count > 0 else 0 -%}
+      {%- set ne_avec_auto = maintenant - cree < 90 and (avant - cree) | abs < 3 -%}
+      {%- set ne_apres_knx = knx > 0 and maintenant - knx < 90 and trigger.from_state.state == 'off'
+           and avant > knx - 1 and avant - knx < 10 -%}
+      {{ ctx.user_id is not none or ctx.parent_id is not none or alarme
+         or not (maintenant - avant < 90 and (ne_avec_auto or ne_apres_knx)) }}
+  - condition: time
+    after: !input heure_debut
+    before: !input heure_fin
+
+actions:
+  # Petite attente : si l'état change encore dans la seconde (double appui,
+  # variation), seule la dernière valeur est annoncée (mode restart). Pas
+  # d'attente pour un capteur : une impulsion courte (sonnette) serait perdue.
+  # Ensuite l'annonce part dans la file d'attente et ne peut plus être coupée.
+  - delay: "{{ 0 if domaine == 'binary_sensor' else 1 }}"
+  # Serrure en cours d'ouverture : on attend l'état qui suit.
+  - if: "{{ domaine == 'lock' and is_state(entite, 'opening') }}"
+    then:
+      - wait_template: "{{ not is_state(entite, 'opening') }}"
+        timeout: "00:00:35"
+        continue_on_timeout: true
+  - variables:
+      etat_brut: "{{ trigger.to_state.state if domaine == 'binary_sensor' else states(entite) }}"
+      # Volet encore en mouvement après 1 s : il sort de la position fermée.
+      # Serrure déverrouillée dont la gâche est déjà retombée : c'est une ouverture.
+      etat: >-
+        {{ 'open' if (domaine == 'cover' and etat_brut == 'opening')
+                  or (domaine == 'lock' and trigger.from_state.state == 'unlocked'
+                      and trigger.to_state.state in ['opening', 'open'] and etat_brut == 'unlocked')
+           else etat_brut }}
+      nom: "{{ nom_saisi if nom_saisi | trim != '' else (state_attr(entite, 'friendly_name') or entite) | trim }}"
+      marche: "{{ etat in cote_marche }}"
+      final: >-
+        {{ etat in ['on', 'off', 'open', 'closed', 'locked', 'unlocked',
+                    'heat', 'cool', 'auto', 'heat_cool', 'dry', 'fan_only'] }}
+      # Déjà en marche avant (clim qui change de mode, serrure déverrouillée
+      # dont on ouvre la gâche) : on dit le message automatique (« en
+      # déshumidification », « ouverte ») plutôt que le message d'allumage.
+      deja_en_marche: "{{ trigger.from_state.state in cote_marche }}"
+      # Accord automatique : d'après le premier mot du nom, sinon d'après le type.
+      feminin: >-
+        {%- set premier = ((nom | string | lower).split() or [''])[0] -%}
+        {%- set feminins = ['porte', 'porte-fenêtre', 'fenêtre', 'baie', 'lumière', 'lampe', 'applique',
+             'suspension', 'prise', 'serrure', 'gâche', 'clim', 'climatisation', 'barrière', 'pompe',
+             'chaudière', 'hotte', 'ventilation', 'vmc', 'alarme', 'sirène', 'caméra', 'télé',
+             'télévision', 'machine', 'guirlande', 'led', 'veilleuse', 'piscine', 'fontaine'] -%}
+        {%- set masculins = ['portail', 'verrou', 'climatiseur', 'split', 'volet', 'store', 'éclairage',
+             'spot', 'spots', 'contact', 'détecteur', 'capteur', 'ventilateur', 'chauffage', 'radiateur',
+             'plafonnier', 'lustre', 'ruban', 'garage', 'velux', 'rideau', 'rideaux', 'interrupteur',
+             'bouton', 'chauffe-eau', 'cumulus', 'arrosage', 'éclairages'] -%}
+        {%- if genre in ['f', 'm'] -%}{%- set f = genre == 'f' -%}
+        {%- elif premier in feminins -%}{%- set f = true -%}
+        {%- elif premier in masculins -%}{%- set f = false -%}
+        {%- else -%}{%- set f = domaine in ['lock', 'climate']
+             or (domaine == 'binary_sensor' and classe in ['door', 'window', 'garage_door', 'lock'])
+             or (domaine == 'cover' and classe in ['door', 'window', 'garage']) -%}
+        {%- endif -%}{{ f }}
+      mot: >-
+        {% set portes = ['door', 'window', 'garage_door', 'opening'] %}
+        {% set presences = ['motion', 'occupancy', 'presence'] %}
+        {% set capteurs = {
+          'lock': ['déverrouillé', 'verrouillé'],
+          'battery': ['batterie faible', 'batterie normale'],
+          'battery_charging': ['en charge', 'plus en charge'],
+          'carbon_monoxide': ['monoxyde de carbone détecté', 'plus de monoxyde de carbone'],
+          'gas': ['gaz détecté', 'plus de gaz'],
+          'smoke': ['fumée détectée', 'plus de fumée'],
+          'moisture': ['fuite détectée', 'plus de fuite'],
+          'safety': ['danger détecté', 'plus de danger'],
+          'problem': ['problème détecté', 'problème résolu'],
+          'tamper': ['sabotage détecté', 'fin du sabotage'],
+          'vibration': ['vibration détectée', 'plus de vibration'],
+          'sound': ['bruit détecté', 'plus de bruit'],
+          'heat': ['surchauffe détectée', 'température normale'],
+          'cold': ['froid détecté', 'température normale'],
+          'connectivity': ['connecté', 'déconnecté'],
+          'plug': ['branché', 'débranché'],
+          'power': ['sous tension', 'hors tension'],
+          'running': ['en marche', 'arrêté'],
+          'moving': ['en mouvement', 'immobile'],
+          'light': ['lumière détectée', 'plus de lumière'],
+          'update': ['mise à jour disponible', 'à jour'] } %}
+        {% set modes = {'heat': 'en chauffage', 'cool': 'en climatisation',
+                        'auto': 'en mode automatique', 'heat_cool': 'en mode automatique',
+                        'dry': 'en déshumidification', 'fan_only': 'en ventilation'} %}
+        {% if domaine == 'light' %}{% set w = 'allumé' if etat == 'on' else 'éteint' %}
+        {% elif domaine in ['switch', 'fan', 'input_boolean'] %}{% set w = 'activé' if etat == 'on' else 'désactivé' %}
+        {% elif domaine == 'cover' %}{% set w = 'ouvert' if etat == 'open' else 'fermé' %}
+        {% elif domaine == 'lock' %}{% set w = {'locked': 'verrouillé', 'unlocked': 'déverrouillé', 'open': 'ouvert'}.get(etat, etat) %}
+        {% elif domaine == 'climate' %}{% set w = 'éteint' if etat == 'off' else modes.get(etat, etat) %}
+        {% elif domaine == 'binary_sensor' and classe in portes %}{% set w = 'ouvert' if etat == 'on' else 'fermé' %}
+        {% elif domaine == 'binary_sensor' and classe in presences %}{% set w = 'présence détectée' if etat == 'on' else 'plus de présence' %}
+        {% elif domaine == 'binary_sensor' and classe in capteurs %}{% set w = capteurs[classe][0] if etat == 'on' else capteurs[classe][1] %}
+        {% else %}{% set w = 'activé' if etat == 'on' else 'désactivé' %}{% endif %}
+        {% if feminin and w.split() | count == 1 and (w.endswith('é') or w in ['éteint', 'ouvert']) %}{{ w ~ 'e' }}{% else %}{{ w }}{% endif %}
+      perso: "{{ ('' if deja_en_marche else message_marche) if marche else message_arret }}"
+      message: >-
+        {% if perso | trim != '' %}{{ perso | replace('{nom}', nom) | trim }}
+        {% else %}{{ nom }} {{ mot | trim }}.{% endif %}
+      # Messages automatiques en français ; un message écrit en arabe est lu par
+      # la voix arabe, sinon la langue des réglages avancés.
+      voix: "{{ 'fr' if perso | trim == '' else ('ar' if perso is search('[؀-ۿ]') else langue) }}"
+      url: >-
+        media-source://tts/{{ moteur_tts }}?message={{ message | trim | urlencode }}&language={{ voix }}
+      # Alarme (fumée, gaz, fuite…) : jouée tout de suite, sans attendre la file.
+      urgent: "{{ domaine == 'binary_sensor' and etat == 'on' and classe in alarmes }}"
+      file_ok: "{{ states(file_annonces) not in ['unavailable', 'unknown'] }}"
+  - condition: template
+    value_template: "{{ final }}"
+  - condition: template
+    value_template: "{{ quand == 'les_deux' or (quand == 'marche' and marche) or (quand == 'arret' and not marche) }}"
+  - if: "{{ file_ok and not urgent }}"
+    then:
+      # La file joue les annonces une par une, relance la musique et remet le
+      # volume ; elle rend la main tout de suite.
+      - action: script.turn_on
+        target:
+          entity_id: !input file_annonces
+        data:
+          variables:
+            enceintes: "{{ enceintes }}"
+            url: "{{ url | trim }}"
+            volume: "{{ volume | int }}"
+            carillon: "{{ carillon }}"
+            emis: "{{ now().timestamp() }}"
+    else:
+      - if: "{{ not file_ok }}"
+        then:
+          - action: persistent_notification.create
+            continue_on_error: true
+            data:
+              notification_id: domo_file_annonces_absente
+              title: "Annonces vocales : file d'attente introuvable"
+              message: >-
+                {{ file_annonces }} n'existe pas : les annonces de « {{ nom }} » sont
+                jouées directement (sans file d'attente, sans reprise de la musique
+                ni remise du volume). Créer le script « Domo · File annonces » ou le
+                choisir dans les réglages avancés du modèle.
+      - action: media_player.play_media
+        continue_on_error: true
+        target:
+          entity_id: !input enceintes
+        data:
+          media_content_id: "{{ url | trim }}"
+          media_content_type: music
+          announce: true
+          extra:
+            announce_volume: "{{ volume | int }}"
+            use_pre_announce: "{{ carillon }}"

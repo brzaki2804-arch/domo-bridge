@@ -1,29 +1,58 @@
 blueprint:
   name: "Domo · Capteur / contact → KNX"
   description: >
-    Publie l'état d'un capteur (contact de porte, température, humidité,
-    luminosité, CO2, présence…) sur une adresse de groupe KNX, avec réponse
-    aux lectures et envoi au démarrage.
+    Publie les états d'un capteur (contact de porte, température, humidité,
+    et une valeur libre : luminosité, CO2, puissance…) sur des adresses de
+    groupe KNX, avec réponse aux lectures et envoi au démarrage.
+    Chaque objet est facultatif : laisser l'entité vide et l'adresse à 31/7/254.
   domain: automation
   author: Domo DZ
   input:
-    entite:
-      name: Capteur
-      selector: { entity: { domain: [binary_sensor, sensor, input_number, number] } }
-    ga_status:
-      name: "Status — R,T — adresse de groupe"
+    contact:
+      name: Contact (porte, fenêtre)
+      description: Capteur d'ouverture (binary_sensor, état « on » = ouvert)
+      default: []
+      selector: { entity: { domain: binary_sensor, multiple: true } }
+    ga_contact:
+      name: "Open/Close Status — R,T — 1 bit — DPT 1.009 (0 = ouvert, 1 = fermé)"
+      default: "31/7/254"
       selector: { text: {} }
-    dpt:
-      name: Type de donnée (DPT)
-      default: binary
+    temperature:
+      name: Température
+      default: []
+      selector: { entity: { domain: [sensor, input_number, number], multiple: true } }
+    ga_temperature:
+      name: "Température Status — R,T — 2 octets — DPT 9.001 (°C)"
+      default: "31/7/254"
+      selector: { text: {} }
+    humidite:
+      name: Humidité
+      default: []
+      selector: { entity: { domain: [sensor, input_number, number], multiple: true } }
+    ga_humidite:
+      name: "Humidité Status — R,T — 2 octets — DPT 9.007 (%)"
+      default: "31/7/254"
+      selector: { text: {} }
+    autre:
+      name: Autre valeur (facultatif)
+      description: Luminosité, CO2, puissance, présence…
+      default: []
+      selector: { entity: { domain: [binary_sensor, sensor, input_number, number], multiple: true } }
+    ga_autre:
+      name: "Autre valeur Status — R,T — adresse de groupe"
+      default: "31/7/254"
+      selector: { text: {} }
+    dpt_autre:
+      name: Type de donnée de l'autre valeur (DPT)
+      default: illuminance
       selector:
         select:
           options:
-            - { label: "1 bit — contact / présence (DPT 1.x)", value: binary }
-            - { label: "Température °C (DPT 9.001)", value: temperature }
-            - { label: "Humidité % (DPT 9.007)", value: humidity }
+            - { label: "1 bit — présence / état (DPT 1.001, 1 = actif)", value: binary }
             - { label: "Luminosité lux (DPT 9.004)", value: illuminance }
             - { label: "CO2 ppm (DPT 9.008)", value: ppm }
+            - { label: "Température °C (DPT 9.001)", value: temperature }
+            - { label: "Humidité % (DPT 9.007)", value: humidity }
             - { label: "Pourcentage 0-100 % (DPT 5.001)", value: percent }
             - { label: "Entier 0-255 (DPT 5.010)", value: 1byte_unsigned }
             - { label: "Puissance W (DPT 14.056)", value: power }
@@ -33,23 +62,41 @@ blueprint:
             - { label: "Texte 14 caractères (DPT 16.000)", value: string }
 
 mode: queued
-max: 20
+max: 30
 
 variables:
-  entite: !input entite
-  dpt: !input dpt
-  valeur: >-
-    {% set s = states(entite) %}
-    {% if dpt == 'binary' %}{{ 1 if s in ['on', 'open', 'true', '1'] else 0 }}
-    {% elif dpt == 'string' %}{{ (s | string)[:14] }}
-    {% else %}{{ s | float(0) }}{% endif %}
+  vide: "31/7/254"
+  contact: !input contact
+  temperature: !input temperature
+  humidite: !input humidite
+  autre: !input autre
+  ga_contact: !input ga_contact
+  ga_temperature: !input ga_temperature
+  ga_humidite: !input ga_humidite
+  ga_autre: !input ga_autre
+  dpt_autre: !input dpt_autre
+  # Une entité par objet : si plusieurs sont choisies, la première est utilisée.
+  e_contact: "{{ (contact if contact is list else [contact]) | first | default('') }}"
+  e_temperature: "{{ (temperature if temperature is list else [temperature]) | first | default('') }}"
+  e_humidite: "{{ (humidite if humidite is list else [humidite]) | first | default('') }}"
+  e_autre: "{{ (autre if autre is list else [autre]) | first | default('') }}"
+  hors_service: ["unknown", "unavailable", "", "None"]
 
 triggers:
   - trigger: state
-    entity_id: !input entite
-    id: etat
+    entity_id: !input contact
+    id: contact
+  - trigger: state
+    entity_id: !input temperature
+    id: temperature
+  - trigger: state
+    entity_id: !input humidite
+    id: humidite
+  - trigger: state
+    entity_id: !input autre
+    id: autre
   - trigger: knx.telegram
-    destination: [!input ga_status]
+    destination: [!input ga_contact, !input ga_temperature, !input ga_humidite, !input ga_autre]
     group_value_write: false
     group_value_read: true
     group_value_response: false
@@ -60,23 +107,62 @@ triggers:
     event: start
     id: demarrage
 
-conditions:
-  - "{{ states(entite) not in ['unknown', 'unavailable'] }}"
-
 actions:
   - if: [{ condition: trigger, id: demarrage }]
     then: [{ delay: { seconds: 10 } }]
-  - if: "{{ dpt == 'binary' }}"
+  - variables:
+      reponse: "{{ trigger.id == 'lecture' }}"
+      dest: "{{ trigger.destination if trigger.id == 'lecture' else '' }}"
+      tout: "{{ trigger.id == 'demarrage' }}"
+  # Contact — DPT 1.009 : 0 = ouvert, 1 = fermé
+  - if:
+      - "{{ ga_contact != vide and e_contact != '' and states(e_contact) not in hors_service }}"
+      - "{{ tout or trigger.id == 'contact' or dest == ga_contact }}"
     then:
       - action: knx.send
         data:
-          address: !input ga_status
-          payload: "{{ valeur }}"
-          response: "{{ trigger.id == 'lecture' }}"
-    else:
+          address: !input ga_contact
+          payload: "{{ 0 if is_state(e_contact, 'on') else 1 }}"
+          response: "{{ reponse }}"
+  # Température — DPT 9.001
+  - if:
+      - "{{ ga_temperature != vide and e_temperature != '' and states(e_temperature) not in hors_service }}"
+      - "{{ tout or trigger.id == 'temperature' or dest == ga_temperature }}"
+    then:
       - action: knx.send
         data:
-          address: !input ga_status
-          payload: "{{ valeur }}"
-          type: "{{ dpt }}"
-          response: "{{ trigger.id == 'lecture' }}"
+          address: !input ga_temperature
+          payload: "{{ states(e_temperature) | float(0) }}"
+          type: temperature
+          response: "{{ reponse }}"
+  # Humidité — DPT 9.007
+  - if:
+      - "{{ ga_humidite != vide and e_humidite != '' and states(e_humidite) not in hors_service }}"
+      - "{{ tout or trigger.id == 'humidite' or dest == ga_humidite }}"
+    then:
+      - action: knx.send
+        data:
+          address: !input ga_humidite
+          payload: "{{ states(e_humidite) | float(0) }}"
+          type: humidity
+          response: "{{ reponse }}"
+  # Autre valeur — DPT au choix
+  - if:
+      - "{{ ga_autre != vide and e_autre != '' and states(e_autre) not in hors_service }}"
+      - "{{ tout or trigger.id == 'autre' or dest == ga_autre }}"
+    then:
+      - if: "{{ dpt_autre == 'binary' }}"
+        then:
+          - action: knx.send
+            data:
+              address: !input ga_autre
+              payload: "{{ 1 if states(e_autre) in ['on', 'open', 'true', '1', 'home', 'detected'] else 0 }}"
+              response: "{{ reponse }}"
+        else:
+          - action: knx.send
+            data:
+              address: !input ga_autre
+              payload: >-
+                {% if dpt_autre == 'string' %}{{ (states(e_autre) | string)[:14] }}{% else %}{{ states(e_autre) | float(0) }}{% endif %}
+              type: "{{ dpt_autre }}"
+              response: "{{ reponse }}"
